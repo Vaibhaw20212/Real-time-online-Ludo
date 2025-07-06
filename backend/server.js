@@ -28,6 +28,8 @@ class LudoGame {
     this.diceValue = 0;
     this.canRoll = true;
     this.consecutiveSixes = 0;
+    this.gameFinished = false;
+    this.rankings = []; // Track finish order
     
     // Initialize board positions for 4 players
     this.pawns = {
@@ -37,34 +39,46 @@ class LudoGame {
       3: [{ pos: -1, id: 0 }, { pos: -1, id: 1 }, { pos: -1, id: 2 }, { pos: -1, id: 3 }]  // Green
     };
     
-    // Starting positions for each player
-    this.startPositions = [0, 13, 26, 39];
-    this.homePositions = [1, 14, 27, 40]; // Safe positions after start
-    this.finishPositions = [56, 57, 58, 59]; // Finish line positions
+    // Starting positions for each player on the main track
+    this.startPositions = [1, 14, 27, 40]; // Entry points after rolling 6
+    this.safePositions = [1, 9, 14, 22, 27, 35, 40, 48]; // Safe squares
+    this.homeStretchStart = [51, 12, 25, 38]; // Where home stretch begins for each player
   }
 
   addPlayer(playerId, playerName) {
     if (this.players.length >= 4) return false;
     
     const playerColor = ['red', 'blue', 'yellow', 'green'][this.players.length];
-    this.players.push({ id: playerId, name: playerName, color: playerColor, index: this.players.length });
-    
-    if (this.players.length === 4) {
-      this.gameStarted = true;
-    }
+    this.players.push({ 
+      id: playerId, 
+      name: playerName, 
+      color: playerColor, 
+      index: this.players.length,
+      finished: false,
+      finishRank: null
+    });
     
     return true;
   }
 
   removePlayer(playerId) {
     this.players = this.players.filter(p => p.id !== playerId);
-    if (this.players.length < 4) {
+    if (this.players.length < 2) {
       this.gameStarted = false;
     }
   }
 
+  startGame() {
+    if (this.players.length >= 2 && !this.gameStarted) {
+      this.gameStarted = true;
+      this.currentTurn = 0;
+      return true;
+    }
+    return false;
+  }
+
   rollDice() {
-    if (!this.canRoll) return null;
+    if (!this.canRoll || this.gameFinished) return null;
     
     this.diceValue = Math.floor(Math.random() * 6) + 1;
     this.canRoll = false;
@@ -75,9 +89,19 @@ class LudoGame {
         // Three consecutive sixes - lose turn
         this.consecutiveSixes = 0;
         this.nextTurn();
+        return this.diceValue;
       }
     } else {
       this.consecutiveSixes = 0;
+    }
+    
+    // Check if player has any valid moves
+    const validMoves = this.getValidMoves(this.currentTurn);
+    if (validMoves.length === 0) {
+      // No valid moves, skip turn
+      setTimeout(() => {
+        this.nextTurn();
+      }, 1000);
     }
     
     return this.diceValue;
@@ -104,10 +128,17 @@ class LudoGame {
       return true;
     }
     
-    // If pawn is on board, can move if won't exceed finish
+    // If pawn is on board
     if (pawn.pos >= 0) {
       const newPos = this.calculateNewPosition(playerIndex, pawn.pos, this.diceValue);
-      return newPos !== -1;
+      
+      // Check if new position is valid
+      if (newPos === -1) return false;
+      
+      // Check if new position is blocked by enemy stack
+      if (this.isBlocked(newPos, playerIndex)) return false;
+      
+      return true;
     }
     
     return false;
@@ -121,23 +152,49 @@ class LudoGame {
     
     if (currentPos === -1) return -1;
     
-    const newPos = currentPos + diceValue;
-    
-    // Check if pawn has completed a full lap and is heading home
-    const startPos = this.startPositions[playerIndex];
-    if (currentPos >= startPos && newPos >= startPos + 51) {
-      const homeTrackPos = (newPos - startPos) - 51;
-      if (homeTrackPos <= 5) {
-        return 52 + playerIndex * 6 + homeTrackPos; // Home track positions
-      }
-      return -1; // Invalid move
+    // Check if pawn is in home stretch (positions 100+)
+    if (currentPos >= 100) {
+      const homePos = currentPos - 100;
+      const newHomePos = homePos + diceValue;
+      if (newHomePos > 6) return -1; // Can't overshoot home
+      if (newHomePos === 6) return 106; // Final home position
+      return 100 + newHomePos;
     }
     
-    return newPos % 52;
+    // Regular board movement
+    const newPos = currentPos + diceValue;
+    
+    // Check if pawn should enter home stretch
+    const homeEntry = this.homeStretchStart[playerIndex];
+    if (currentPos <= homeEntry && newPos > homeEntry) {
+      // Calculate how many steps into home stretch
+      const homeSteps = newPos - homeEntry;
+      if (homeSteps > 6) return -1; // Can't overshoot
+      if (homeSteps === 6) return 106; // Final home
+      return 100 + homeSteps; // Home stretch positions
+    }
+    
+    // Normal circular movement
+    return newPos > 52 ? newPos - 52 : newPos;
+  }
+
+  isBlocked(position, playerIndex) {
+    // Count enemy pawns at this position
+    let enemyCount = 0;
+    for (let i = 0; i < 4; i++) {
+      if (i === playerIndex) continue;
+      if (i >= this.players.length) continue;
+      
+      const enemyPawns = this.pawns[i].filter(pawn => pawn.pos === position);
+      enemyCount += enemyPawns.length;
+    }
+    
+    // Blocked if 2 or more enemy pawns
+    return enemyCount >= 2;
   }
 
   movePawn(playerIndex, pawnIndex) {
-    if (!this.gameStarted || this.currentTurn !== playerIndex || this.canRoll) {
+    if (!this.gameStarted || this.currentTurn !== playerIndex || this.canRoll || this.gameFinished) {
       return false;
     }
     
@@ -146,12 +203,15 @@ class LudoGame {
     }
     
     const pawn = this.pawns[playerIndex][pawnIndex];
+    const oldPos = pawn.pos;
     const newPos = this.calculateNewPosition(playerIndex, pawn.pos, this.diceValue);
     
     if (newPos === -1) return false;
     
-    // Check for captures
-    this.checkCapture(newPos, playerIndex);
+    // Check for captures (only on regular board, not in home stretch)
+    if (newPos < 100 && newPos !== 106) {
+      this.checkCapture(newPos, playerIndex);
+    }
     
     // Move the pawn
     pawn.pos = newPos;
@@ -160,7 +220,7 @@ class LudoGame {
     this.checkWinner();
     
     // Handle turn progression
-    if (this.diceValue !== 6) {
+    if (this.diceValue !== 6 && newPos !== 106) { // Extra turn for 6 or reaching home
       this.nextTurn();
     } else {
       this.canRoll = true;
@@ -170,41 +230,57 @@ class LudoGame {
   }
 
   checkCapture(position, currentPlayerIndex) {
+    // Don't capture on safe positions
+    if (this.safePositions.includes(position)) return;
+    
     // Check if any other player's pawn is at this position
     for (let playerIndex = 0; playerIndex < 4; playerIndex++) {
       if (playerIndex === currentPlayerIndex) continue;
+      if (playerIndex >= this.players.length) continue;
       
-      this.pawns[playerIndex].forEach(pawn => {
-        if (pawn.pos === position && !this.isSafePosition(position)) {
-          pawn.pos = -1; // Send back to home
-        }
-      });
+      const pawnsAtPosition = this.pawns[playerIndex].filter(pawn => pawn.pos === position);
+      
+      // Only capture if exactly one enemy pawn (not a stack)
+      if (pawnsAtPosition.length === 1) {
+        pawnsAtPosition[0].pos = -1; // Send back to home
+      }
     }
   }
 
-  isSafePosition(position) {
-    // Safe positions are start positions and some special squares
-    return this.startPositions.includes(position) || 
-           this.homePositions.includes(position) ||
-           position >= 52; // Home track is always safe
-  }
-
   checkWinner() {
-    for (let playerIndex = 0; playerIndex < 4; playerIndex++) {
+    for (let playerIndex = 0; playerIndex < this.players.length; playerIndex++) {
+      const player = this.players[playerIndex];
+      if (player.finished) continue;
+      
       const playerPawns = this.pawns[playerIndex];
-      const finishedPawns = playerPawns.filter(pawn => pawn.pos >= 52 + playerIndex * 6 + 5);
+      const finishedPawns = playerPawns.filter(pawn => pawn.pos === 106);
       
       if (finishedPawns.length === 4) {
-        this.winner = playerIndex;
-        return;
+        player.finished = true;
+        player.finishRank = this.rankings.length + 1;
+        this.rankings.push(playerIndex);
+        
+        if (this.winner === null) {
+          this.winner = playerIndex;
+        }
+        
+        // Check if game is completely finished
+        const activePlayers = this.players.filter(p => !p.finished);
+        if (activePlayers.length <= 1) {
+          this.gameFinished = true;
+        }
       }
     }
   }
 
   nextTurn() {
-    this.currentTurn = (this.currentTurn + 1) % 4;
+    do {
+      this.currentTurn = (this.currentTurn + 1) % this.players.length;
+    } while (this.players[this.currentTurn].finished && !this.gameFinished);
+    
     this.canRoll = true;
     this.diceValue = 0;
+    this.consecutiveSixes = 0;
   }
 
   getGameState() {
@@ -217,7 +293,10 @@ class LudoGame {
       diceValue: this.diceValue,
       canRoll: this.canRoll,
       pawns: this.pawns,
-      validMoves: this.gameStarted ? this.getValidMoves(this.currentTurn) : []
+      validMoves: this.gameStarted ? this.getValidMoves(this.currentTurn) : [],
+      gameFinished: this.gameFinished,
+      rankings: this.rankings,
+      safePositions: this.safePositions
     };
   }
 }
@@ -254,6 +333,16 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('start-game', () => {
+    const roomId = socket.roomId;
+    if (!roomId || !gameRooms.has(roomId)) return;
+    
+    const game = gameRooms.get(roomId);
+    if (game.startGame()) {
+      io.to(roomId).emit('game-state', game.getGameState());
+    }
+  });
+
   socket.on('roll-dice', () => {
     const roomId = socket.roomId;
     if (!roomId || !gameRooms.has(roomId)) return;
@@ -264,7 +353,10 @@ io.on('connection', (socket) => {
     if (currentPlayer && currentPlayer.id === socket.id) {
       const diceValue = game.rollDice();
       if (diceValue) {
-        io.to(roomId).emit('game-state', game.getGameState());
+        io.to(roomId).emit('dice-rolled', { value: diceValue, player: game.currentTurn });
+        setTimeout(() => {
+          io.to(roomId).emit('game-state', game.getGameState());
+        }, 1000);
       }
     }
   });
@@ -278,7 +370,14 @@ io.on('connection', (socket) => {
     
     if (currentPlayer && currentPlayer.id === socket.id) {
       if (game.movePawn(game.currentTurn, pawnIndex)) {
-        io.to(roomId).emit('game-state', game.getGameState());
+        io.to(roomId).emit('pawn-moved', { 
+          player: game.currentTurn, 
+          pawn: pawnIndex,
+          newPosition: game.pawns[game.currentTurn][pawnIndex].pos
+        });
+        setTimeout(() => {
+          io.to(roomId).emit('game-state', game.getGameState());
+        }, 500);
       }
     }
   });
